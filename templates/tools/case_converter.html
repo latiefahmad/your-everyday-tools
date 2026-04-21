@@ -1,0 +1,91 @@
+{% extends "base.html" %}
+{% block title %}Case Converter - EveryTools{% endblock %}
+{% block top_title %}Case Converter{% endblock %}
+
+{% block content %}
+<div class="client-tool">
+    <div class="tool-header">
+        <h1>Case Converter</h1>
+        <p>Convert text between different cases</p>
+    </div>
+    <div class="form-group">
+        <label>Input Text</label>
+        <textarea id="case-input" class="text-input" rows="4" placeholder="Type or paste your text here..." oninput="convertAll()"></textarea>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:.8rem">
+        <div class="calc-section">
+            <div class="pane-header" style="margin:-1.2rem -1.2rem .8rem;padding:.5rem .8rem"><span>UPPERCASE</span>
+                <button class="btn btn-small" onclick="copyText('case-upper')"><i class="bi bi-clipboard"></i></button>
+            </div>
+            <div id="case-upper" style="font-size:.9rem;word-break:break-word;min-height:2em"></div>
+        </div>
+        <div class="calc-section">
+            <div class="pane-header" style="margin:-1.2rem -1.2rem .8rem;padding:.5rem .8rem"><span>lowercase</span>
+                <button class="btn btn-small" onclick="copyText('case-lower')"><i class="bi bi-clipboard"></i></button>
+            </div>
+            <div id="case-lower" style="font-size:.9rem;word-break:break-word;min-height:2em"></div>
+        </div>
+        <div class="calc-section">
+            <div class="pane-header" style="margin:-1.2rem -1.2rem .8rem;padding:.5rem .8rem"><span>Title Case</span>
+                <button class="btn btn-small" onclick="copyText('case-title')"><i class="bi bi-clipboard"></i></button>
+            </div>
+            <div id="case-title" style="font-size:.9rem;word-break:break-word;min-height:2em"></div>
+        </div>
+        <div class="calc-section">
+            <div class="pane-header" style="margin:-1.2rem -1.2rem .8rem;padding:.5rem .8rem"><span>Sentence case</span>
+                <button class="btn btn-small" onclick="copyText('case-sentence')"><i class="bi bi-clipboard"></i></button>
+            </div>
+            <div id="case-sentence" style="font-size:.9rem;word-break:break-word;min-height:2em"></div>
+        </div>
+        <div class="calc-section">
+            <div class="pane-header" style="margin:-1.2rem -1.2rem .8rem;padding:.5rem .8rem"><span>camelCase</span>
+                <button class="btn btn-small" onclick="copyText('case-camel')"><i class="bi bi-clipboard"></i></button>
+            </div>
+            <div id="case-camel" style="font-size:.9rem;word-break:break-word;min-height:2em"></div>
+        </div>
+        <div class="calc-section">
+            <div class="pane-header" style="margin:-1.2rem -1.2rem .8rem;padding:.5rem .8rem"><span>snake_case</span>
+                <button class="btn btn-small" onclick="copyText('case-snake')"><i class="bi bi-clipboard"></i></button>
+            </div>
+            <div id="case-snake" style="font-size:.9rem;word-break:break-word;min-height:2em"></div>
+        </div>
+        <div class="calc-section">
+            <div class="pane-header" style="margin:-1.2rem -1.2rem .8rem;padding:.5rem .8rem"><span>kebab-case</span>
+                <button class="btn btn-small" onclick="copyText('case-kebab')"><i class="bi bi-clipboard"></i></button>
+            </div>
+            <div id="case-kebab" style="font-size:.9rem;word-break:break-word;min-height:2em"></div>
+        </div>
+        <div class="calc-section">
+            <div class="pane-header" style="margin:-1.2rem -1.2rem .8rem;padding:.5rem .8rem"><span>PascalCase</span>
+                <button class="btn btn-small" onclick="copyText('case-pascal')"><i class="bi bi-clipboard"></i></button>
+            </div>
+            <div id="case-pascal" style="font-size:.9rem;word-break:break-word;min-height:2em"></div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function copyText(id) { navigator.clipboard.writeText(document.getElementById(id).textContent); }
+
+function toWords(s) {
+    return s.replace(/([a-z])([A-Z])/g, '$1 $2')
+            .replace(/[_\-]+/g, ' ')
+            .trim().split(/\s+/).filter(w => w);
+}
+
+function convertAll() {
+    const t = document.getElementById("case-input").value;
+    const words = toWords(t);
+    document.getElementById("case-upper").textContent = t.toUpperCase();
+    document.getElementById("case-lower").textContent = t.toLowerCase();
+    document.getElementById("case-title").textContent = words.map(w => w[0].toUpperCase() + w.slice(1).toLowerCase()).join(" ");
+    document.getElementById("case-sentence").textContent = t.charAt(0).toUpperCase() + t.slice(1).toLowerCase();
+    document.getElementById("case-camel").textContent = words.map((w, i) => i === 0 ? w.toLowerCase() : w[0].toUpperCase() + w.slice(1).toLowerCase()).join("");
+    document.getElementById("case-snake").textContent = words.map(w => w.toLowerCase()).join("_");
+    document.getElementById("case-kebab").textContent = words.map(w => w.toLowerCase()).join("-");
+    document.getElementById("case-pascal").textContent = words.map(w => w[0].toUpperCase() + w.slice(1).toLowerCase()).join("");
+}
+</script>
+{% endblock %}

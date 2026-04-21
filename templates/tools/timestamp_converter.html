@@ -1,0 +1,97 @@
+{% extends "base.html" %}
+{% block title %}Timestamp Converter - EveryTools{% endblock %}
+{% block top_title %}Timestamp Converter{% endblock %}
+
+{% block content %}
+<div class="client-tool">
+    <div class="tool-header">
+        <h1>Timestamp Converter</h1>
+        <p>Convert between Unix timestamps and human-readable dates</p>
+    </div>
+
+    <div class="calc-section">
+        <h3>Current Time</h3>
+        <div class="calc-result-inline" id="ts-now"></div>
+        <div style="font-size:.85rem;color:var(--text-light)" id="ts-now-date"></div>
+    </div>
+
+    <div class="calc-section">
+        <h3>Unix Timestamp &rarr; Date</h3>
+        <div class="inline-form">
+            <input type="number" id="ts-input" placeholder="e.g. 1700000000" class="wide" oninput="tsToDate()">
+            <select id="ts-unit" onchange="tsToDate()" style="width:auto">
+                <option value="s">Seconds</option>
+                <option value="ms">Milliseconds</option>
+            </select>
+        </div>
+        <div id="ts-to-date-result" class="calc-result-inline" style="font-size:1rem;margin-top:.5rem">&mdash;</div>
+    </div>
+
+    <div class="calc-section">
+        <h3>Date &rarr; Unix Timestamp</h3>
+        <div class="inline-form">
+            <input type="datetime-local" id="ts-date-input" onchange="dateToTs()" step="1">
+        </div>
+        <div style="display:flex;gap:1rem;margin-top:.5rem">
+            <div>
+                <div style="font-size:.8rem;color:var(--text-light)">Seconds</div>
+                <div class="calc-result-inline" id="ts-from-date-s" style="font-size:1rem">&mdash;</div>
+            </div>
+            <div>
+                <div style="font-size:.8rem;color:var(--text-light)">Milliseconds</div>
+                <div class="calc-result-inline" id="ts-from-date-ms" style="font-size:1rem">&mdash;</div>
+            </div>
+        </div>
+        <button class="btn btn-small" style="margin-top:.5rem" onclick="copyTs()"><i class="bi bi-clipboard"></i> Copy seconds</button>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function updateNow() {
+    const now = Math.floor(Date.now() / 1000);
+    document.getElementById("ts-now").textContent = now;
+    document.getElementById("ts-now-date").textContent = new Date().toLocaleString();
+}
+updateNow();
+setInterval(updateNow, 1000);
+
+function tsToDate() {
+    const val = document.getElementById("ts-input").value;
+    const unit = document.getElementById("ts-unit").value;
+    if (!val) { document.getElementById("ts-to-date-result").textContent = "\u2014"; return; }
+
+    let ms = parseInt(val);
+    if (unit === "s") ms *= 1000;
+
+    const d = new Date(ms);
+    if (isNaN(d)) { document.getElementById("ts-to-date-result").textContent = "Invalid timestamp"; return; }
+
+    document.getElementById("ts-to-date-result").innerHTML =
+        `<div>${d.toLocaleString()} <span style="color:var(--text-light);font-size:.85rem">(Local)</span></div>` +
+        `<div>${d.toUTCString()} <span style="color:var(--text-light);font-size:.85rem">(UTC)</span></div>` +
+        `<div>${d.toISOString()} <span style="color:var(--text-light);font-size:.85rem">(ISO 8601)</span></div>`;
+}
+
+function dateToTs() {
+    const val = document.getElementById("ts-date-input").value;
+    if (!val) return;
+    const d = new Date(val);
+    const s = Math.floor(d.getTime() / 1000);
+    document.getElementById("ts-from-date-s").textContent = s;
+    document.getElementById("ts-from-date-ms").textContent = d.getTime();
+}
+
+function copyTs() {
+    const s = document.getElementById("ts-from-date-s").textContent;
+    if (s !== "\u2014") navigator.clipboard.writeText(s);
+}
+
+// Pre-fill date input with now
+const now = new Date();
+const local = new Date(now.getTime() - now.getTimezoneOffset() * 60000).toISOString().slice(0, 19);
+document.getElementById("ts-date-input").value = local;
+dateToTs();
+</script>
+{% endblock %}

@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block title %}Slug Generator - EveryTools{% endblock %}
+{% block top_title %}Slug Generator{% endblock %}
+
+{% block content %}
+<div class="client-tool">
+    <div class="tool-header">
+        <h1>Slug Generator</h1>
+        <p>Create URL-friendly slugs from any text</p>
+    </div>
+    <div class="form-group">
+        <label>Input Text</label>
+        <textarea id="slug-input" class="text-input" rows="3" placeholder="My Blog Post Title! (2024)" oninput="generateSlug()"></textarea>
+    </div>
+    <div class="form-group">
+        <label>Separator</label>
+        <div class="radio-group">
+            <label class="radio-label"><input type="radio" name="sep" value="-" checked onchange="generateSlug()"><span>Hyphen (-)</span></label>
+            <label class="radio-label"><input type="radio" name="sep" value="_" onchange="generateSlug()"><span>Underscore (_)</span></label>
+        </div>
+    </div>
+    <div class="pane" style="margin-top:1rem">
+        <div class="pane-header">
+            <span>Slug</span>
+            <button class="btn btn-small" onclick="navigator.clipboard.writeText(document.getElementById('slug-output').textContent)"><i class="bi bi-clipboard"></i> Copy</button>
+        </div>
+        <div class="pane-body">
+            <pre id="slug-output" style="min-height:2em;font-size:1rem;color:var(--primary)"></pre>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function generateSlug() {
+    const input = document.getElementById("slug-input").value;
+    const sep = document.querySelector('input[name="sep"]:checked').value;
+    const slug = input
+        .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+        .toLowerCase()
+        .replace(/[^a-z0-9\s-]/g, "")
+        .trim()
+        .replace(/[\s-]+/g, sep);
+    document.getElementById("slug-output").textContent = slug;
+}
+</script>
+{% endblock %}

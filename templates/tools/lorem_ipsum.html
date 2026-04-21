@@ -1,0 +1,92 @@
+{% extends "base.html" %}
+{% block title %}Lorem Ipsum Generator - EveryTools{% endblock %}
+{% block top_title %}Lorem Ipsum{% endblock %}
+
+{% block content %}
+<div class="client-tool">
+    <div class="tool-header">
+        <h1>Lorem Ipsum Generator</h1>
+        <p>Generate placeholder text for your designs and layouts</p>
+    </div>
+    <div style="display:flex;gap:.8rem;align-items:flex-end;margin-bottom:1rem;flex-wrap:wrap">
+        <div class="form-group" style="margin-bottom:0">
+            <label>Amount</label>
+            <input type="number" id="li-count" value="3" min="1" max="100" style="width:80px" oninput="generate()">
+        </div>
+        <div class="form-group" style="margin-bottom:0">
+            <label>Type</label>
+            <select id="li-type" onchange="generate()">
+                <option value="paragraphs">Paragraphs</option>
+                <option value="sentences">Sentences</option>
+                <option value="words">Words</option>
+            </select>
+        </div>
+        <label class="checkbox-label" style="margin-bottom:.3rem">
+            <input type="checkbox" id="li-start" checked onchange="generate()">
+            <span>Start with "Lorem ipsum..."</span>
+        </label>
+    </div>
+    <div class="pane">
+        <div class="pane-header">
+            <span>Generated Text</span>
+            <button class="btn btn-small" onclick="navigator.clipboard.writeText(document.getElementById('li-output').textContent)"><i class="bi bi-clipboard"></i> Copy</button>
+        </div>
+        <div class="pane-body">
+            <div id="li-output" style="white-space:pre-wrap;line-height:1.7;font-size:.9rem;min-height:150px"></div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const LOREM = "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.";
+
+const WORDS = "a ac accumsan adipiscing aenean aliquam aliquet amet ante aptent arcu at auctor augue bibendum blandit class commodo condimentum congue consectetur consequat conubia convallis cras cubilia cum curabitur cursus dapibus diam dictum dictumst dignissim dis dolor donec dui duis egestas eget eleifend elementum elit enim erat eros est et etiam eu euismod facilisi facilisis fames faucibus felis fermentum feugiat fringilla fusce gravida habitant habitasse hac hendrerit himenaeos iaculis id imperdiet in inceptos integer interdum ipsum justo lacinia lacus laoreet lectus leo libero ligula litora lobortis lorem luctus maecenas magna magnis malesuada massa mattis mauris metus mi molestie mollis montes morbi mus nam nascetur natoque nec neque netus nibh nisi nisl non nostra nulla nullam nunc odio orci ornare parturient pellentesque penatibus per pharetra phasellus placerat platea porta porttitor posuere potenti praesent pretium primis proin pulvinar purus quam quis quisque rhoncus ridiculus risus rutrum sagittis sapien scelerisque sed sem semper senectus sit sociis sociosqu sodales sollicitudin suscipit suspendisse taciti tellus tempor tempus tincidunt torquent tortor tristique turpis ullamcorper ultrices ultricies urna ut varius vehicula vel velit venenatis vestibulum vitae vivamus viverra volutpat vulputate".split(" ");
+
+function randomSentence(minWords, maxWords) {
+    const len = minWords + Math.floor(Math.random() * (maxWords - minWords));
+    const words = [];
+    for (let i = 0; i < len; i++) words.push(WORDS[Math.floor(Math.random() * WORDS.length)]);
+    words[0] = words[0][0].toUpperCase() + words[0].slice(1);
+    return words.join(" ") + ".";
+}
+
+function randomParagraph() {
+    const count = 4 + Math.floor(Math.random() * 5);
+    const sentences = [];
+    for (let i = 0; i < count; i++) sentences.push(randomSentence(6, 16));
+    return sentences.join(" ");
+}
+
+function generate() {
+    const count = parseInt(document.getElementById("li-count").value) || 1;
+    const type = document.getElementById("li-type").value;
+    const startLorem = document.getElementById("li-start").checked;
+    let result = "";
+
+    if (type === "paragraphs") {
+        const paras = [];
+        for (let i = 0; i < count; i++) paras.push(randomParagraph());
+        if (startLorem) paras[0] = LOREM + " " + paras[0];
+        result = paras.join("\n\n");
+    } else if (type === "sentences") {
+        const sents = [];
+        for (let i = 0; i < count; i++) sents.push(randomSentence(6, 16));
+        if (startLorem) sents[0] = LOREM.split(". ")[0] + ".";
+        result = sents.join(" ");
+    } else {
+        const words = [];
+        if (startLorem) {
+            const loremWords = LOREM.replace(/[.,]/g, "").toLowerCase().split(" ");
+            for (let i = 0; i < Math.min(count, loremWords.length); i++) words.push(loremWords[i]);
+        }
+        while (words.length < count) words.push(WORDS[Math.floor(Math.random() * WORDS.length)]);
+        result = words.slice(0, count).join(" ");
+    }
+    document.getElementById("li-output").textContent = result;
+}
+
+generate();
+</script>
+{% endblock %}

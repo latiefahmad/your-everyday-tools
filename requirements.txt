@@ -1,0 +1,24 @@
+# Core
+Flask
+Pillow
+PyMuPDF
+qrcode[pil]
+python-barcode
+markdown
+reportlab
+svglib
+img2pdf
+python-docx
+openpyxl
+xlrd
+sqlparse
+croniter
+jsonpath-ng
+
+# Optional (app works without these, shows install message if missing)
+rembg
+pyzbar
+pdf2docx
+pytesseract
+ezdxf
+matplotlib
