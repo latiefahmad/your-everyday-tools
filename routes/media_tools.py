@@ -1,8 +1,13 @@
 import os
+import json
+import importlib.util
 import shutil
 import subprocess
 import tempfile
 from flask import Blueprint, render_template, request, send_file, jsonify
+
+from routes._helpers import safe_int, safe_float, log_error, NO_FILE_SINGLE
+from utils.capabilities import QUALITY_HIGH, set_conversion_metadata
 
 bp = Blueprint("media", __name__)
 
@@ -62,6 +67,65 @@ def _save_upload(file_storage, tmpdir: str) -> str:
     return path
 
 
+def _probe_media(path: str) -> dict | None:
+    if not FFPROBE:
+        return None
+    try:
+        proc = subprocess.run(
+            [
+                FFPROBE,
+                "-v", "error",
+                "-print_format", "json",
+                "-show_streams",
+                "-show_format",
+                path,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except Exception:
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        return json.loads(proc.stdout or "{}")
+    except json.JSONDecodeError:
+        return None
+
+
+def _first_codec(probe: dict | None, codec_type: str) -> str | None:
+    for stream in (probe or {}).get("streams", []):
+        if stream.get("codec_type") == codec_type:
+            return stream.get("codec_name")
+    return None
+
+
+def _can_copy_video(probe: dict | None, target_fmt: str) -> bool:
+    video = _first_codec(probe, "video")
+    audio = _first_codec(probe, "audio")
+    if target_fmt == "mp4":
+        return video in {"h264", "hevc", "mpeg4"} and (audio in {None, "aac", "mp3", "alac"})
+    if target_fmt == "webm":
+        return video in {"vp8", "vp9", "av1"} and (audio in {None, "vorbis", "opus"})
+    if target_fmt == "mkv":
+        return True
+    if target_fmt == "mov":
+        return video in {"h264", "hevc", "prores"} and (audio in {None, "aac", "pcm_s16le", "alac"})
+    return False
+
+
+def _media_response(data: bytes, *, mimetype: str | None = None,
+                    download_name: str, warnings: list[str] | None = None):
+    resp = send_file(
+        _bytes_io(data),
+        mimetype=mimetype,
+        as_attachment=True,
+        download_name=download_name,
+    )
+    return set_conversion_metadata(resp, "ffmpeg", QUALITY_HIGH, warnings or [])
+
+
 # ── Audio convert ──────────────────────────────────────
 
 @bp.route("/convert-audio", methods=["GET", "POST"])
@@ -102,7 +166,7 @@ def convert_audio():
 
     f = request.files.get("files")
     if not f:
-        return jsonify({"error": "No file uploaded."}), 400
+        return jsonify({"error": NO_FILE_SINGLE}), 400
     fmt = request.form.get("format", "mp3")
     if fmt not in AUDIO_FORMATS:
         return jsonify({"error": "Unsupported target format."}), 400
@@ -126,12 +190,7 @@ def convert_audio():
             data = fp.read()
 
     base = f.filename.rsplit(".", 1)[0]
-    return send_file(
-        _bytes_io(data),
-        mimetype=f"audio/{fmt}",
-        as_attachment=True,
-        download_name=f"{base}.{fmt}",
-    )
+    return _media_response(data, mimetype=f"audio/{fmt}", download_name=f"{base}.{fmt}")
 
 
 # ── Video convert ──────────────────────────────────────
@@ -155,28 +214,52 @@ def convert_video():
                     "default": "mp4",
                     "choices": [{"value": f, "label": f.upper()} for f in VIDEO_FORMATS],
                 },
+                {
+                    "name": "quality",
+                    "label": "Quality",
+                    "type": "select",
+                    "default": "auto",
+                    "choices": [
+                        {"value": "auto", "label": "Auto preserve when compatible"},
+                        {"value": "high", "label": "High quality re-encode"},
+                        {"value": "standard", "label": "Standard re-encode"},
+                    ],
+                },
             ],
             button_text="Convert",
         )
 
     f = request.files.get("files")
     if not f:
-        return jsonify({"error": "No file uploaded."}), 400
+        return jsonify({"error": NO_FILE_SINGLE}), 400
     fmt = request.form.get("format", "mp4")
     if fmt not in VIDEO_FORMATS:
         return jsonify({"error": "Unsupported target format."}), 400
+    quality = request.form.get("quality", "auto")
+    if quality not in ("auto", "high", "standard"):
+        quality = "auto"
+    warnings = []
 
     with tempfile.TemporaryDirectory() as tmp:
         in_path = _save_upload(f, tmp)
         out_path = os.path.join(tmp, f"output.{fmt}")
 
+        probe = _probe_media(in_path)
         args = ["-i", in_path]
-        if fmt == "webm":
-            args += ["-c:v", "libvpx-vp9", "-c:a", "libopus", out_path]
-        elif fmt == "mp4":
-            args += ["-c:v", "libx264", "-c:a", "aac", "-preset", "medium", out_path]
+        if quality == "auto" and _can_copy_video(probe, fmt):
+            args += ["-c", "copy", out_path]
         else:
-            args += [out_path]
+            if quality == "auto" and probe is None:
+                warnings.append("ffprobe metadata was unavailable; FFmpeg re-encoded streams instead of attempting stream copy.")
+            elif quality == "auto":
+                warnings.append("Input streams were not compatible with the target container; FFmpeg re-encoded them.")
+            crf = "20" if quality == "high" else "23"
+            if fmt == "webm":
+                args += ["-c:v", "libvpx-vp9", "-crf", "30" if quality == "standard" else "24", "-b:v", "0", "-c:a", "libopus", out_path]
+            elif fmt == "mp4":
+                args += ["-c:v", "libx264", "-crf", crf, "-c:a", "aac", "-preset", "medium", out_path]
+            else:
+                args += [out_path]
 
         _, err = _run_ffmpeg(args, timeout=600)
         if err:
@@ -186,12 +269,7 @@ def convert_video():
             data = fp.read()
 
     base = f.filename.rsplit(".", 1)[0]
-    return send_file(
-        _bytes_io(data),
-        mimetype=f"video/{fmt}",
-        as_attachment=True,
-        download_name=f"{base}.{fmt}",
-    )
+    return _media_response(data, mimetype=f"video/{fmt}", download_name=f"{base}.{fmt}", warnings=warnings)
 
 
 # ── Extract audio from video ───────────────────────────
@@ -226,7 +304,7 @@ def extract_audio():
 
     f = request.files.get("files")
     if not f:
-        return jsonify({"error": "No file uploaded."}), 400
+        return jsonify({"error": NO_FILE_SINGLE}), 400
     fmt = request.form.get("format", "mp3")
     if fmt not in ("mp3", "wav", "ogg", "m4a"):
         return jsonify({"error": "Unsupported audio format."}), 400
@@ -250,12 +328,7 @@ def extract_audio():
             data = fp.read()
 
     base = f.filename.rsplit(".", 1)[0]
-    return send_file(
-        _bytes_io(data),
-        mimetype=f"audio/{fmt}",
-        as_attachment=True,
-        download_name=f"{base}.{fmt}",
-    )
+    return _media_response(data, mimetype=f"audio/{fmt}", download_name=f"{base}.{fmt}")
 
 
 # ── Trim media ─────────────────────────────────────────
@@ -290,7 +363,7 @@ def trim():
 
     f = request.files.get("files")
     if not f:
-        return jsonify({"error": "No file uploaded."}), 400
+        return jsonify({"error": NO_FILE_SINGLE}), 400
 
     start = (request.form.get("start") or "0").strip()
     end = (request.form.get("end") or "").strip()
@@ -320,11 +393,7 @@ def trim():
             data = fp.read()
 
     base = f.filename.rsplit(".", 1)[0]
-    return send_file(
-        _bytes_io(data),
-        as_attachment=True,
-        download_name=f"{base}_trimmed.{ext}",
-    )
+    return _media_response(data, download_name=f"{base}_trimmed.{ext}")
 
 
 # ── Compress video ─────────────────────────────────────
@@ -371,7 +440,7 @@ def compress_video():
 
     f = request.files.get("files")
     if not f:
-        return jsonify({"error": "No file uploaded."}), 400
+        return jsonify({"error": NO_FILE_SINGLE}), 400
 
     crf = request.form.get("quality", "28")
     preset = request.form.get("preset", "medium")
@@ -394,12 +463,7 @@ def compress_video():
             data = fp.read()
 
     base = f.filename.rsplit(".", 1)[0]
-    return send_file(
-        _bytes_io(data),
-        mimetype="video/mp4",
-        as_attachment=True,
-        download_name=f"{base}_compressed.mp4",
-    )
+    return _media_response(data, mimetype="video/mp4", download_name=f"{base}_compressed.mp4")
 
 
 # ── Video to GIF ───────────────────────────────────────
@@ -427,13 +491,10 @@ def video_to_gif():
 
     f = request.files.get("files")
     if not f:
-        return jsonify({"error": "No file uploaded."}), 400
+        return jsonify({"error": NO_FILE_SINGLE}), 400
 
-    try:
-        fps = max(1, min(30, int(request.form.get("fps", 15))))
-        width = max(100, min(1920, int(request.form.get("width", 480))))
-    except ValueError:
-        return jsonify({"error": "FPS and width must be integers."}), 400
+    fps = safe_int(request.form.get("fps"), 15, min_val=1, max_val=30)
+    width = safe_int(request.form.get("width"), 480, min_val=100, max_val=1920)
 
     start = (request.form.get("start") or "0").strip()
     duration = (request.form.get("duration") or "").strip()
@@ -459,12 +520,7 @@ def video_to_gif():
             data = fp.read()
 
     base = f.filename.rsplit(".", 1)[0]
-    return send_file(
-        _bytes_io(data),
-        mimetype="image/gif",
-        as_attachment=True,
-        download_name=f"{base}.gif",
-    )
+    return _media_response(data, mimetype="image/gif", download_name=f"{base}.gif")
 
 
 # ── Subtitle convert / shift ───────────────────────────
@@ -565,7 +621,17 @@ def subtitle_convert():
         return render_template(
             "upload_tool.html",
             title="Convert Subtitles",
-            description="Convert subtitles between SRT and WebVTT. Also shift timing by a positive or negative offset (seconds).",
+            description="Convert subtitles between SRT and WebVTT. Also shift timing by a positive or negative offset.",
+            notes=(
+                '<p><strong>Pure Python conversion — no FFmpeg or external tools needed.</strong></p>'
+                '<p><strong>Supported inputs:</strong> SubRip <code>.srt</code> and WebVTT <code>.vtt</code> files. '
+                'BOM-prefixed UTF-8 files are handled. Other formats (ASS/SSA, SUB, etc.) are not supported here — '
+                'convert to SRT first using a tool like Aegisub.</p>'
+                '<p><strong>Time shift</strong> is in seconds and can be negative. Use to fix subtitles that '
+                'are consistently early (positive shift) or late (negative shift) compared to the audio. '
+                'For non-uniform drift (subtitles speeding up over time), this tool can\'t help — you need '
+                'a re-timing tool.</p>'
+            ),
             endpoint="/media/subtitle-convert",
             accept=".srt,.vtt",
             multiple=False,
@@ -592,14 +658,12 @@ def subtitle_convert():
 
     f = request.files.get("files")
     if not f:
-        return jsonify({"error": "No file uploaded."}), 400
+        return jsonify({"error": NO_FILE_SINGLE}), 400
     target = request.form.get("target", "srt").lower()
     if target not in ("srt", "vtt"):
         return jsonify({"error": "Unsupported target format."}), 400
-    try:
-        offset = float(request.form.get("offset", "0"))
-    except ValueError:
-        return jsonify({"error": "Offset must be a number."}), 400
+    offset = safe_float(request.form.get("offset"), 0.0,
+                        min_val=-3600.0, max_val=3600.0)
 
     raw = f.read().decode("utf-8-sig", errors="replace")
     cues = _parse_subs(raw)
@@ -611,12 +675,13 @@ def subtitle_convert():
 
     out_text = _write_srt(cues) if target == "srt" else _write_vtt(cues)
     base = f.filename.rsplit(".", 1)[0]
-    return send_file(
+    resp = send_file(
         _bytes_io(out_text.encode("utf-8")),
         mimetype="text/plain",
         as_attachment=True,
         download_name=f"{base}.{target}",
     )
+    return set_conversion_metadata(resp, "python", QUALITY_HIGH)
 
 
 # ── Burn subtitles ─────────────────────────────────────
@@ -670,10 +735,7 @@ def burn_subtitles():
     if not sub or not sub.filename:
         return jsonify({"error": "Please upload a subtitle file."}), 400
 
-    try:
-        font_size = max(10, min(72, int(request.form.get("font_size", 22))))
-    except ValueError:
-        font_size = 22
+    font_size = safe_int(request.form.get("font_size"), 22, min_val=10, max_val=72)
     crf = request.form.get("quality", "23")
     if crf not in ("18", "23", "28"):
         crf = "23"
@@ -706,12 +768,254 @@ def burn_subtitles():
             data = fp.read()
 
     base = f.filename.rsplit(".", 1)[0]
-    return send_file(
-        _bytes_io(data),
-        mimetype="video/mp4",
-        as_attachment=True,
-        download_name=f"{base}_subs.mp4",
-    )
+    return _media_response(data, mimetype="video/mp4", download_name=f"{base}_subs.mp4")
+
+
+# ── Audio Normalize (FFmpeg loudnorm, EBU R128) ────────
+
+@bp.route("/normalize-audio", methods=["GET", "POST"])
+def normalize_audio():
+    if request.method == "GET":
+        return render_template(
+            "upload_tool.html",
+            title="Normalize Audio",
+            description="Normalize loudness to a target LUFS level (EBU R128 standard).",
+            notes=_ffmpeg_available_notes() + (
+                '<p><strong>Loudness targets — pick one that matches where the audio will be played:</strong></p>'
+                '<ul style="margin:.4rem 0 .6rem 1.2rem">'
+                '<li><strong>-14 LUFS</strong> — Spotify, YouTube, Apple Music, podcasts</li>'
+                '<li><strong>-16 LUFS</strong> — most podcast networks (Apple Podcasts spec)</li>'
+                '<li><strong>-23 LUFS</strong> — EBU R128 broadcast standard (Europe TV/radio)</li>'
+                '<li><strong>-24 LUFS</strong> — ATSC A/85 broadcast (US TV)</li>'
+                '</ul>'
+            ),
+            endpoint="/media/normalize-audio",
+            accept=".mp3,.wav,.ogg,.flac,.aac,.m4a,.opus,.wma,.mp4,.mkv,.mov",
+            multiple=False,
+            options=[
+                {
+                    "name": "lufs",
+                    "label": "Target loudness",
+                    "type": "select",
+                    "default": "-14",
+                    "choices": [
+                        {"value": "-14", "label": "-14 LUFS (Streaming, podcasts)"},
+                        {"value": "-16", "label": "-16 LUFS (Apple Podcasts)"},
+                        {"value": "-23", "label": "-23 LUFS (EBU R128 broadcast)"},
+                        {"value": "-24", "label": "-24 LUFS (ATSC A/85 broadcast)"},
+                    ],
+                },
+                {
+                    "name": "format",
+                    "label": "Output format",
+                    "type": "select",
+                    "default": "same",
+                    "choices": [
+                        {"value": "same", "label": "Same as input"},
+                        {"value": "mp3",  "label": "MP3 (192 kbps)"},
+                        {"value": "wav",  "label": "WAV (lossless)"},
+                        {"value": "flac", "label": "FLAC (lossless)"},
+                    ],
+                },
+            ],
+            button_text="Normalize",
+        )
+
+    f = request.files.get("files")
+    if not f:
+        return jsonify({"error": NO_FILE_SINGLE}), 400
+
+    lufs_str = request.form.get("lufs", "-14")
+    if lufs_str not in ("-14", "-16", "-23", "-24"):
+        lufs_str = "-14"
+    out_fmt = request.form.get("format", "same").lower()
+
+    in_ext = f.filename.rsplit(".", 1)[-1].lower() if "." in f.filename else "mp3"
+    out_ext = in_ext if out_fmt == "same" else out_fmt
+
+    with tempfile.TemporaryDirectory() as tmp:
+        in_path = _save_upload(f, tmp)
+        out_path = os.path.join(tmp, f"output.{out_ext}")
+
+        # loudnorm linear=true: single-pass normalisation; faster and safe
+        # for casual use. Two-pass is more accurate but doubles encode time.
+        af = f"loudnorm=I={lufs_str}:TP=-1.5:LRA=11:linear=true:print_format=summary"
+
+        args = ["-i", in_path, "-af", af]
+        if out_ext == "mp3":
+            args += ["-b:a", "192k"]
+        elif out_ext == "flac":
+            args += ["-c:a", "flac"]
+        elif out_ext == "wav":
+            args += ["-c:a", "pcm_s16le"]
+        args += [out_path]
+
+        _, err = _run_ffmpeg(args, timeout=600)
+        if err:
+            return jsonify({"error": err}), 400
+
+        with open(out_path, "rb") as fp:
+            data = fp.read()
+
+    base = f.filename.rsplit(".", 1)[0]
+    mime_map = {"mp3": "audio/mpeg", "wav": "audio/wav", "flac": "audio/flac",
+                "ogg": "audio/ogg", "m4a": "audio/mp4", "opus": "audio/opus"}
+    mime = mime_map.get(out_ext, "application/octet-stream")
+    return _media_response(data, mimetype=mime, download_name=f"{base}_normalized.{out_ext}")
+
+
+# ── Speech to Text (Whisper, optional) ──────────────
+
+HAS_WHISPER = importlib.util.find_spec("whisper") is not None
+
+WHISPER_MODELS = ["tiny", "base", "small", "medium", "large"]
+_whisper_model_cache: dict = {}
+_whisper_module = None
+
+
+@bp.route("/transcribe", methods=["GET", "POST"])
+def transcribe():
+    if request.method == "GET":
+        if HAS_WHISPER:
+            status_note = (
+                '<p><i class="bi bi-check-circle-fill" style="color:#2ec4b6"></i> '
+                '<strong>Whisper is installed.</strong> First run with a given model size '
+                'downloads the weights from openai.com (one-time, ~75 MB to ~3 GB depending on size).</p>'
+            )
+        else:
+            status_note = (
+                '<p><i class="bi bi-exclamation-triangle-fill" style="color:#ffb703"></i> '
+                '<strong>Whisper is not installed.</strong> Run <code>pip install openai-whisper</code> '
+                'and restart the server. FFmpeg must also be on PATH.</p>'
+            )
+        return render_template(
+            "upload_tool.html",
+            title="Speech to Text (Whisper)",
+            description="Transcribe spoken audio or video to text or subtitles, fully local.",
+            notes=status_note + (
+                '<p><strong>Model size guide</strong> (smaller = faster + lower quality):</p>'
+                '<ul style="margin:.4rem 0 .6rem 1.2rem">'
+                '<li><strong>tiny</strong> — ~75 MB, very fast, ok for clear English</li>'
+                '<li><strong>base</strong> — ~150 MB, recommended starting point</li>'
+                '<li><strong>small</strong> — ~500 MB, good multilingual quality</li>'
+                '<li><strong>medium</strong> — ~1.5 GB, near-best quality, slow on CPU</li>'
+                '<li><strong>large</strong> — ~3 GB, best quality, very slow on CPU</li>'
+                '</ul>'
+                '<p style="font-size:.9em;color:var(--muted)">Without a GPU, expect roughly '
+                '0.5×–2× real-time for tiny/base/small, and 5×–20× real-time for medium/large. '
+                'A 10-minute audio file at <code>medium</code> on CPU can take 50+ minutes.</p>'
+            ),
+            endpoint="/media/transcribe",
+            accept=".mp3,.wav,.ogg,.flac,.aac,.m4a,.opus,.mp4,.webm,.mkv,.mov",
+            multiple=False,
+            options=[
+                {
+                    "name": "model",
+                    "label": "Model size",
+                    "type": "select",
+                    "default": "base",
+                    "choices": [{"value": m, "label": m} for m in WHISPER_MODELS],
+                },
+                {
+                    "name": "language",
+                    "label": "Language hint (blank = auto-detect)",
+                    "type": "text",
+                    "placeholder": "e.g. en, id, ja, es",
+                },
+                {
+                    "name": "format",
+                    "label": "Output format",
+                    "type": "select",
+                    "default": "txt",
+                    "choices": [
+                        {"value": "txt", "label": "Plain text (.txt)"},
+                        {"value": "srt", "label": "SubRip subtitles (.srt)"},
+                        {"value": "vtt", "label": "WebVTT subtitles (.vtt)"},
+                    ],
+                },
+            ],
+            button_text="Transcribe",
+        )
+
+    if not HAS_WHISPER:
+        return jsonify({"error": "Whisper is not installed. Run: pip install openai-whisper"}), 400
+    if not FFMPEG:
+        return jsonify({"error": "Whisper needs FFmpeg on PATH. Install FFmpeg and restart the server."}), 400
+
+    f = request.files.get("files")
+    if not f:
+        return jsonify({"error": NO_FILE_SINGLE}), 400
+
+    model_size = request.form.get("model", "base")
+    if model_size not in WHISPER_MODELS:
+        model_size = "base"
+    language = (request.form.get("language") or "").strip() or None
+    out_fmt = request.form.get("format", "txt").lower()
+    if out_fmt not in ("txt", "srt", "vtt"):
+        out_fmt = "txt"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        in_path = _save_upload(f, tmp)
+
+        try:
+            global _whisper_module
+            if _whisper_module is None:
+                import whisper as whisper_module  # type: ignore
+                _whisper_module = whisper_module
+            model = _whisper_model_cache.get(model_size)
+            if model is None:
+                model = _whisper_module.load_model(model_size)
+                _whisper_model_cache[model_size] = model
+            result = model.transcribe(in_path, language=language, verbose=False)
+        except Exception as e:
+            from routes._helpers import log_error as _log
+            _log(e, f"whisper {model_size}")
+            return jsonify({"error": "Transcription failed. Check the server log; first-time model download may also fail without network access."}), 400
+
+    base = f.filename.rsplit(".", 1)[0]
+
+    if out_fmt == "txt":
+        return jsonify({
+            "text": (result.get("text") or "").strip() or "(no speech detected)",
+            "engine": "whisper",
+            "quality": QUALITY_HIGH,
+            "warnings": [],
+        })
+
+    # Build SRT / VTT from segments
+    segments = result.get("segments") or []
+
+    def fmt_srt_ts(sec: float) -> str:
+        if sec < 0: sec = 0.0
+        h = int(sec // 3600); m = int((sec % 3600) // 60); s = sec - h * 3600 - m * 60
+        whole = int(s); ms = int(round((s - whole) * 1000))
+        if ms == 1000: whole += 1; ms = 0
+        return f"{h:02d}:{m:02d}:{whole:02d},{ms:03d}"
+
+    if out_fmt == "srt":
+        lines = []
+        for i, seg in enumerate(segments, 1):
+            lines.append(str(i))
+            lines.append(f"{fmt_srt_ts(seg['start'])} --> {fmt_srt_ts(seg['end'])}")
+            lines.append((seg.get("text") or "").strip())
+            lines.append("")
+        body = "\n".join(lines).rstrip() + "\n"
+        resp = send_file(_bytes_io(body.encode("utf-8")), mimetype="text/plain",
+                         as_attachment=True, download_name=f"{base}.srt")
+        return set_conversion_metadata(resp, "whisper", QUALITY_HIGH)
+
+    # vtt
+    lines = ["WEBVTT", ""]
+    for seg in segments:
+        s = fmt_srt_ts(seg["start"]).replace(",", ".")
+        e = fmt_srt_ts(seg["end"]).replace(",", ".")
+        lines.append(f"{s} --> {e}")
+        lines.append((seg.get("text") or "").strip())
+        lines.append("")
+    body = "\n".join(lines).rstrip() + "\n"
+    resp = send_file(_bytes_io(body.encode("utf-8")), mimetype="text/plain",
+                     as_attachment=True, download_name=f"{base}.vtt")
+    return set_conversion_metadata(resp, "whisper", QUALITY_HIGH)
 
 
 # ── helpers ────────────────────────────────────────────

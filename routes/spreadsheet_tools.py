@@ -19,12 +19,20 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, PageBreak, Table, T
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 
 from utils.file_utils import make_zip
+from utils.capabilities import (
+    QUALITY_BASIC,
+    QUALITY_HIGH,
+    find_soffice,
+    set_conversion_metadata,
+    soffice_convert,
+)
 
 bp = Blueprint("spreadsheet", __name__)
 
 EXCEL_ACCEPT = ".xlsx,.xlsm,.xls"
 EXCEL_EXTS = {"xlsx", "xlsm", "xls"}
 MAX_PDF_ROWS_PER_SHEET = 5000
+SOFFICE = find_soffice()
 
 
 # ── Reader helpers ─────────────────────────────
@@ -38,15 +46,17 @@ def read_workbook(file_data: bytes, filename: str) -> dict[str, list[list]]:
     ext = _ext(filename)
     if ext in ("xlsx", "xlsm"):
         wb = load_workbook(io.BytesIO(file_data), data_only=True, read_only=True)
-        sheets = {}
-        for name in wb.sheetnames:
-            ws = wb[name]
-            rows = []
-            for row in ws.iter_rows(values_only=True):
-                rows.append([_normalize_cell(v) for v in row])
-            sheets[name] = rows
-        wb.close()
-        return sheets
+        try:
+            sheets = {}
+            for name in wb.sheetnames:
+                ws = wb[name]
+                rows = []
+                for row in ws.iter_rows(values_only=True):
+                    rows.append([_normalize_cell(v) for v in row])
+                sheets[name] = rows
+            return sheets
+        finally:
+            wb.close()
 
     if ext == "xls":
         if not HAS_XLRD:
@@ -94,6 +104,20 @@ def excel_to_csv_page():
     return render_template("upload_tool.html",
         title="Excel to CSV / JSON",
         description="Export sheets from an Excel workbook to CSV or JSON",
+        notes=(
+            '<p><strong>Supported inputs:</strong> <code>.xlsx</code>, <code>.xlsm</code>, '
+            '<code>.xls</code> (legacy Excel 97-2003).</p>'
+            '<p><strong>Output:</strong></p>'
+            '<ul style="margin:.4rem 0 .6rem 1.2rem">'
+            '<li><strong>CSV</strong> — UTF-8 with BOM (opens correctly in Excel without garbled characters).</li>'
+            '<li><strong>JSON (array of objects)</strong> — first row used as keys; best for code consumption.</li>'
+            '<li><strong>JSON (array of arrays)</strong> — preserves rows as positional arrays; no key inference.</li>'
+            '</ul>'
+            '<p style="font-size:.9em;color:var(--muted)">If the workbook has multiple sheets and '
+            'you don\'t specify one, all sheets are exported and bundled as a ZIP. '
+            '<strong>Formulas are evaluated to their cached values</strong> (Excel stores both); '
+            'if a formula has never been recalculated, the export shows the stale cached value.</p>'
+        ),
         endpoint="/spreadsheet/excel-to-csv",
         accept=EXCEL_ACCEPT,
         multiple=False,
@@ -127,7 +151,24 @@ def csv_to_excel_page():
 def excel_to_pdf_page():
     return render_template("upload_tool.html",
         title="Excel to PDF",
-        description="Convert an Excel workbook to PDF (one section per sheet). Basic table rendering — not pixel-perfect.",
+        description="Convert an Excel workbook to PDF (one section per sheet)",
+        notes=(
+            '<p><strong>High fidelity path:</strong> LibreOffice is used when installed. '
+            'The basic Python table renderer is only used when you explicitly allow fallback.</p>'
+            '<p><strong>This is a basic renderer, not a pixel-perfect Excel print.</strong> '
+            'It reads cell values and renders each sheet as a simple table. <strong>Not preserved:</strong></p>'
+            '<ul style="margin:.4rem 0 .6rem 1.2rem">'
+            '<li>Cell formatting (fonts, colours, borders, conditional formatting)</li>'
+            '<li>Number formats (dates, currency, percentages — shown as raw values)</li>'
+            '<li>Merged cells, frozen panes, charts, images, embedded objects</li>'
+            '<li>Print areas, page setup, headers/footers</li>'
+            '</ul>'
+            '<p><strong>For full-fidelity Excel to PDF</strong> (matching print output), '
+            'install LibreOffice and this route will use it automatically.</p>'
+            '<p style="font-size:.9em;color:var(--muted)">Output uses one PDF page per sheet '
+            '(or splits across pages if the table is too wide/tall). Auto-fits column widths '
+            'to content.</p>'
+        ),
         endpoint="/spreadsheet/excel-to-pdf",
         accept=EXCEL_ACCEPT,
         multiple=False,
@@ -143,9 +184,11 @@ def excel_to_pdf_page():
              "choices": [
                  {"value": "landscape", "label": "Landscape"},
                  {"value": "portrait", "label": "Portrait"},
-             ]},
+            ]},
             {"type": "number", "name": "fontsize", "label": "Font Size",
              "default": 8, "min": 5, "max": 14},
+            {"type": "checkbox", "name": "use_basic_fallback", "label": "Fallback",
+             "check_label": "Allow basic table fallback if LibreOffice is unavailable or fails"},
         ])
 
 
@@ -255,7 +298,9 @@ def excel_to_csv():
     try:
         sheets = read_workbook(files[0].read(), files[0].filename)
     except Exception as e:
-        return jsonify(error=f"Could not read workbook: {e}"), 400
+        from routes._helpers import log_error
+        log_error(e, "spreadsheet read_workbook")
+        return jsonify(error="Could not read workbook (file may be corrupted or unsupported format)."), 400
 
     if target_sheet:
         if target_sheet not in sheets:
@@ -408,13 +453,41 @@ def _autosize_columns(ws, rows, max_width=60):
 
 @bp.route("/excel-to-pdf", methods=["POST"])
 def excel_to_pdf():
+    from routes._helpers import safe_int, log_error, NO_FILE_SINGLE
+
     files = request.files.getlist("files")
     if not files or not files[0].filename:
-        return jsonify(error="No file uploaded."), 400
+        return jsonify(error=NO_FILE_SINGLE), 400
+
+    file_data = files[0].read()
+    filename = files[0].filename
+    ext = _ext(filename)
+    allow_basic_fallback = request.form.get("use_basic_fallback") == "on"
+
+    if ext not in EXCEL_EXTS:
+        return jsonify(error="Unsupported file type. Upload .xlsx, .xlsm, or .xls."), 400
+
+    try:
+        pdf_bytes = soffice_convert(file_data, ext, "pdf", timeout=300)
+    except Exception as e:
+        log_error(e, "excel-to-pdf libreoffice")
+        pdf_bytes = None
+
+    if pdf_bytes is not None:
+        base = filename.rsplit(".", 1)[0]
+        resp = send_file(io.BytesIO(pdf_bytes), mimetype="application/pdf",
+                         as_attachment=True, download_name=f"{base}.pdf")
+        return set_conversion_metadata(resp, "libreoffice", QUALITY_HIGH)
+
+    if not allow_basic_fallback:
+        return jsonify(error=(
+            "High-fidelity Excel to PDF requires LibreOffice. "
+            "Tick 'Allow basic table fallback' to continue with lower layout fidelity."
+        )), 400
 
     size_name = request.form.get("size", "A4")
     orientation = request.form.get("orientation", "landscape")
-    fontsize = int(request.form.get("fontsize", 8))
+    fontsize = safe_int(request.form.get("fontsize"), 8, min_val=4, max_val=24)
 
     page_size_map = {"A4": A4, "A3": A3, "letter": letter, "legal": legal}
     page_size = page_size_map.get(size_name, A4)
@@ -422,9 +495,10 @@ def excel_to_pdf():
         page_size = landscape(page_size)
 
     try:
-        sheets = read_workbook(files[0].read(), files[0].filename)
+        sheets = read_workbook(file_data, filename)
     except Exception as e:
-        return jsonify(error=f"Could not read workbook: {e}"), 400
+        log_error(e, "excel-to-pdf read")
+        return jsonify(error="Could not read workbook (file may be corrupted or unsupported format)."), 400
 
     buf = io.BytesIO()
     pdf = SimpleDocTemplate(buf, pagesize=page_size,
@@ -485,9 +559,15 @@ def excel_to_pdf():
         return jsonify(error=f"PDF layout failed (table too wide?). Try a larger page size or smaller font. Details: {str(e)[:150]}"), 400
 
     buf.seek(0)
-    base = files[0].filename.rsplit(".", 1)[0]
-    return send_file(buf, mimetype="application/pdf",
+    base = filename.rsplit(".", 1)[0]
+    resp = send_file(buf, mimetype="application/pdf",
                      as_attachment=True, download_name=f"{base}.pdf")
+    return set_conversion_metadata(
+        resp,
+        "openpyxl/reportlab" if ext != "xls" else "xlrd/reportlab",
+        QUALITY_BASIC,
+        "Basic fallback used; formatting, charts, print areas, and page setup are not preserved.",
+    )
 
 
 def _pdf_cell(v):
@@ -551,7 +631,9 @@ def split():
     try:
         sheets = read_workbook(files[0].read(), files[0].filename)
     except Exception as e:
-        return jsonify(error=f"Could not read workbook: {e}"), 400
+        from routes._helpers import log_error
+        log_error(e, "spreadsheet read_workbook")
+        return jsonify(error="Could not read workbook (file may be corrupted or unsupported format)."), 400
 
     if not sheets:
         return jsonify(error="Workbook contains no sheets."), 400
@@ -585,16 +667,19 @@ def _safe_filename(name: str) -> str:
 
 @bp.route("/info", methods=["POST"])
 def info():
+    from routes._helpers import safe_int, log_error, NO_FILE_SINGLE
+
     files = request.files.getlist("files")
     if not files or not files[0].filename:
-        return jsonify(error="No file uploaded."), 400
+        return jsonify(error=NO_FILE_SINGLE), 400
 
-    preview = int(request.form.get("preview_rows", 10))
+    preview = safe_int(request.form.get("preview_rows"), 10, min_val=0, max_val=200)
 
     try:
         sheets = read_workbook(files[0].read(), files[0].filename)
     except Exception as e:
-        return jsonify(error=f"Could not read workbook: {e}"), 400
+        log_error(e, "spreadsheet info")
+        return jsonify(error="Could not read workbook (file may be corrupted or unsupported format)."), 400
 
     lines = [f"File: {files[0].filename}", f"Sheets: {len(sheets)}", ""]
     for name, rows in sheets.items():

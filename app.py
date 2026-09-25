@@ -1,4 +1,3 @@
-import os
 from flask import Flask, render_template
 
 app = Flask(__name__)
@@ -18,6 +17,8 @@ TOOL_CATEGORIES = [
             {"id": "html-to-pdf", "name": "HTML to PDF", "desc": "Convert HTML content to PDF", "icon": "bi-filetype-html"},
             {"id": "md-to-pdf", "name": "Markdown to PDF", "desc": "Convert Markdown text or files to PDF", "icon": "bi-markdown-fill"},
             {"id": "md-to-docx", "name": "Markdown to Word", "desc": "Convert Markdown to a Word .docx document", "icon": "bi-file-word-fill"},
+            {"id": "pdf-to-pptx", "name": "PDF to PowerPoint", "desc": "Each PDF page becomes a slide image", "icon": "bi-file-earmark-slides-fill"},
+            {"id": "pptx-to-pdf", "name": "PowerPoint to PDF", "desc": "Convert .pptx / .ppt / .odp to PDF (needs LibreOffice)", "icon": "bi-file-earmark-pdf-fill"},
             {"id": "ocr-pdf", "name": "OCR PDF", "desc": "Make scanned PDFs searchable or extract text", "icon": "bi-file-earmark-text-fill"},
             {"id": "cad-to-pdf", "name": "CAD to PDF/Image", "desc": "Convert DXF/DWG drawings to PDF or PNG", "icon": "bi-rulers"},
         ],
@@ -37,6 +38,8 @@ TOOL_CATEGORIES = [
             {"id": "protect", "name": "Protect PDF", "desc": "Add password protection to PDF", "icon": "bi-lock-fill"},
             {"id": "unlock", "name": "Unlock PDF", "desc": "Remove PDF password", "icon": "bi-unlock-fill"},
             {"id": "sign", "name": "Sign PDF", "desc": "Stamp a signature image onto PDF pages", "icon": "bi-pen-fill"},
+            {"id": "redact", "name": "Redact PDF", "desc": "Permanently black-out sensitive text", "icon": "bi-eraser-fill"},
+            {"id": "form-fill", "name": "Fill PDF Form", "desc": "Fill AcroForm fields and download a filled PDF", "icon": "bi-input-cursor-text"},
         ],
     },
     {
@@ -72,6 +75,8 @@ TOOL_CATEGORIES = [
             {"id": "palette", "name": "Color Palette", "desc": "Extract a color palette from an image", "icon": "bi-palette2"},
             {"id": "svg-to-png", "name": "SVG to PNG", "desc": "Rasterize SVG vector files to PNG", "icon": "bi-filetype-svg"},
             {"id": "svg-optimize", "name": "SVG Optimizer", "desc": "Strip metadata and shrink SVG files", "icon": "bi-file-minus-fill"},
+            {"id": "heic-convert", "name": "HEIC Converter", "desc": "Convert iPhone .heic photos to JPG / PNG / WebP", "icon": "bi-phone-fill"},
+            {"id": "merge", "name": "Merge Images", "desc": "Combine multiple images into one", "icon": "bi-union"},
         ],
     },
     {
@@ -91,6 +96,8 @@ TOOL_CATEGORIES = [
             {"id": "slug-generator", "name": "Slug Generator", "desc": "Create URL-friendly slugs", "icon": "bi-link"},
             {"id": "json-yaml", "name": "JSON / YAML", "desc": "Convert between JSON and YAML", "icon": "bi-filetype-yml"},
             {"id": "lorem-ipsum", "name": "Lorem Ipsum", "desc": "Generate placeholder text", "icon": "bi-text-paragraph"},
+            {"id": "line-tools", "name": "Line Tools", "desc": "Sort, dedupe, shuffle, count, and more", "icon": "bi-list-ol"},
+            {"id": "extract-patterns", "name": "Extract Patterns", "desc": "Pull emails, URLs, phones, IPs from any text", "icon": "bi-funnel"},
         ],
     },
     {
@@ -116,6 +123,7 @@ TOOL_CATEGORIES = [
             {"id": "generate", "name": "Generate QR", "desc": "Create QR codes from text or URLs", "icon": "bi-qr-code"},
             {"id": "read", "name": "Read QR", "desc": "Decode QR codes from images", "icon": "bi-qr-code-scan"},
             {"id": "barcode", "name": "Generate Barcode", "desc": "Code128, EAN, UPC, ISBN and more", "icon": "bi-upc-scan"},
+            {"id": "wifi", "name": "WiFi QR Code", "desc": "Generate a scan-to-join WiFi QR code", "icon": "bi-wifi"},
         ],
     },
     {
@@ -126,6 +134,8 @@ TOOL_CATEGORIES = [
             {"id": "password-generator", "name": "Password Generator", "desc": "Generate strong random passwords", "icon": "bi-key-fill"},
             {"id": "hash-generator", "name": "Hash Generator", "desc": "Generate MD5, SHA hashes", "icon": "bi-fingerprint"},
             {"id": "file-hash", "name": "File Hash", "desc": "Compute hashes of uploaded files", "icon": "bi-file-earmark-lock-fill"},
+            {"id": "encrypt", "name": "Encrypt File", "desc": "AES-256 encrypt any file with a passphrase", "icon": "bi-lock-fill"},
+            {"id": "decrypt", "name": "Decrypt File", "desc": "Decrypt a file produced by Encrypt File", "icon": "bi-unlock-fill"},
         ],
     },
     {
@@ -168,6 +178,8 @@ TOOL_CATEGORIES = [
             {"id": "video-to-gif", "name": "Video to GIF", "desc": "Convert clips to animated GIFs", "icon": "bi-file-earmark-play-fill"},
             {"id": "subtitle-convert", "name": "Convert Subtitles", "desc": "SRT ↔ VTT with optional time shift", "icon": "bi-badge-cc-fill"},
             {"id": "burn-subtitles", "name": "Burn Subtitles", "desc": "Permanently render subtitles onto a video", "icon": "bi-fire"},
+            {"id": "normalize-audio", "name": "Normalize Audio", "desc": "Loudness normalize to a target LUFS (EBU R128)", "icon": "bi-volume-up-fill"},
+            {"id": "transcribe", "name": "Speech to Text", "desc": "Transcribe audio/video to text or subtitles (Whisper)", "icon": "bi-mic-fill"},
         ],
     },
 ]
@@ -205,6 +217,7 @@ from routes.spreadsheet_tools import bp as spreadsheet_bp
 from routes.dev_tools import bp as dev_bp
 from routes.archive_tools import bp as archive_bp
 from routes.media_tools import bp as media_bp
+from routes.capabilities import bp as capabilities_bp
 
 app.register_blueprint(convert_bp, url_prefix="/convert")
 app.register_blueprint(pdf_bp, url_prefix="/pdf")
@@ -217,6 +230,7 @@ app.register_blueprint(spreadsheet_bp, url_prefix="/spreadsheet")
 app.register_blueprint(dev_bp, url_prefix="/dev")
 app.register_blueprint(archive_bp, url_prefix="/archive")
 app.register_blueprint(media_bp, url_prefix="/media")
+app.register_blueprint(capabilities_bp)
 
 if __name__ == "__main__":
     app.run(debug=True, port=5000)
